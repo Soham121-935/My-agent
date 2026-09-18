@@ -21,8 +21,8 @@ LOGGER = logging.getLogger("matlab_agent.ui")
 class MainWindow:
     """Main application window.
 
-    Tkinter is used intentionally for Phase 1: it is included with the standard
-    Windows Python distribution and packages cleanly with PyInstaller. The view
+    Tkinter is used intentionally for the first desktop phases: it is included
+    with the standard Windows Python distribution and packages cleanly with PyInstaller. The view
     is kept separate from the agent/provider code so a richer UI can replace it
     later without changing MATLAB automation interfaces.
     """
@@ -60,8 +60,8 @@ class MainWindow:
         self._update_connection_status()
         self._append_message(
             "system",
-            "Session ready. Configure an OpenAI-compatible provider in Settings to start chatting.\n"
-            "MATLAB and Simulink tools are intentionally not enabled until Phase 2.",
+            "Session ready. Configure an AI provider and select MATLAB in Settings when it is installed.\n"
+            "Phase 2 can verify the MATLAB installation; command and script execution arrive in Phase 3.",
         )
 
     def _configure_root(self) -> None:
@@ -106,7 +106,7 @@ class MainWindow:
         ttk.Label(heading, text="MATLAB SIMULINK AI AGENT", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             heading,
-            text="Engineering workspace  /  Phase 1: provider-backed agent chat",
+            text="Engineering workspace  /  Phase 2: MATLAB detection and connection",
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(2, 0))
         actions = ttk.Frame(header, style="App.TFrame")
@@ -167,6 +167,40 @@ class MainWindow:
         self.file_list.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
         ttk.Button(parent, text="Refresh", style="Secondary.TButton", command=self._refresh_workspace).pack(anchor="w", pady=(8, 0))
+
+        matlab_card = ttk.Frame(parent, style="Card.TFrame", padding=10)
+        matlab_card.pack(fill=X, pady=(14, 0))
+        ttk.Label(matlab_card, text="MATLAB CONNECTION", style="Card.TLabel").pack(anchor="w")
+        self.matlab_connection_var = tk.StringVar()
+        self.matlab_connection_label = ttk.Label(
+            matlab_card,
+            textvariable=self.matlab_connection_var,
+            style="Card.TLabel",
+            wraplength=220,
+        )
+        self.matlab_connection_label.pack(anchor="w", pady=(5, 0))
+        self.matlab_details_var = tk.StringVar()
+        ttk.Label(
+            matlab_card,
+            textvariable=self.matlab_details_var,
+            style="Muted.TLabel",
+            wraplength=220,
+        ).pack(anchor="w", pady=(3, 0))
+        matlab_actions = ttk.Frame(matlab_card, style="Card.TFrame")
+        matlab_actions.pack(fill=X, pady=(9, 0))
+        self.matlab_test_button = ttk.Button(
+            matlab_actions,
+            text="Test connection",
+            style="Secondary.TButton",
+            command=self._probe_matlab,
+        )
+        self.matlab_test_button.pack(side=LEFT)
+        ttk.Button(
+            matlab_actions,
+            text="Settings",
+            style="Secondary.TButton",
+            command=self._open_settings,
+        ).pack(side=RIGHT)
 
         connection = ttk.Frame(parent, style="Card.TFrame", padding=10)
         connection.pack(fill=X, pady=(14, 0))
@@ -339,11 +373,85 @@ class MainWindow:
             for item in items:
                 self.file_list.insert(END, item.name)
 
+    def _update_matlab_status(self) -> None:
+        executable = self.settings.matlab_executable.strip()
+        if self._matlab_probe_busy:
+            text = "● Testing MATLAB connection…"
+            color = self.WARNING
+            details = executable or "Select matlab.exe in Settings"
+        elif self._matlab_probe_result is not None:
+            result = self._matlab_probe_result
+            text = "● " + ("Connected" if result.connected else "Unavailable")
+            color = self.SUCCESS if result.connected else self.ERROR
+            details = result.message
+        elif executable:
+            valid = self.matlab_detector.validate_executable(executable)
+            if valid is None:
+                text = "● Invalid executable"
+                color = self.ERROR
+                details = "Select a valid matlab.exe"
+            else:
+                text = "● Selected, not tested"
+                color = self.WARNING
+                details = str(valid)
+        elif self.matlab_installations:
+            text = f"● {len(self.matlab_installations)} installation(s) found"
+            color = self.WARNING
+            details = "Select MATLAB in Settings"
+        else:
+            text = "● MATLAB not found"
+            color = self.MUTED
+            details = "Install MATLAB or select matlab.exe"
+        self.matlab_connection_var.set(text)
+        self.matlab_connection_label.configure(foreground=color)
+        self.matlab_details_var.set(details)
+        self.matlab_status.configure(text=f"MATLAB: {text[2:]}")
+
+    def _probe_matlab(self) -> None:
+        if self._matlab_probe_busy:
+            return
+        executable = self.settings.matlab_executable.strip()
+        if not executable:
+            self._append_message("system", "Select a MATLAB executable in Settings before testing the connection.")
+            self._open_settings()
+            return
+        self._matlab_probe_busy = True
+        self.matlab_test_button.configure(state="disabled")
+        self.footer_status.configure(text="Starting MATLAB connection probe…")
+        self._update_matlab_status()
+        thread = threading.Thread(target=self._matlab_probe_worker, daemon=True)
+        thread.start()
+
+    def _matlab_probe_worker(self) -> None:
+        result = self.matlab_connection.probe(
+            self.settings.matlab_executable,
+            timeout_seconds=self.settings.matlab_command_timeout_seconds,
+            working_directory=self.settings.matlab_working_directory or None,
+        )
+        self.root.after(0, lambda: self._matlab_probe_complete(result))
+
+    def _matlab_probe_complete(self, result: MatlabProbeResult) -> None:
+        self._matlab_probe_result = result
+        self._matlab_probe_busy = False
+        self.matlab_test_button.configure(state="normal")
+        self._update_matlab_status()
+        if result.connected:
+            self.settings.matlab_version = result.release
+            self.settings_store.save(self.settings)
+            self._append_message("system", f"MATLAB connection verified: {result.message}")
+            self.footer_status.configure(text="MATLAB connection ready")
+        else:
+            detail = result.message
+            if result.stderr:
+                detail += f"\nMATLAB output: {result.stderr}"
+            self._append_message("error", f"MATLAB connection failed: {detail}")
+            self.footer_status.configure(text="MATLAB unavailable — review Settings or logs")
+
     def _update_connection_status(self) -> None:
         configured = bool(self.settings.api_base_url.strip() and self.settings.model.strip())
         has_key = self.secret_store.has_api_key()
         if configured and (has_key or self._is_local_endpoint(self.settings.api_base_url)):
-            text = "● Ready to call provider" 
+            text = "● Ready to call provider"
             color = self.SUCCESS
         elif configured:
             text = "● Endpoint set; API key needed"
@@ -361,25 +469,29 @@ class MainWindow:
         return "localhost" in lowered or "127.0.0.1" in lowered or "[::1]" in lowered
 
     def _open_settings(self) -> None:
-        if self._busy:
-            messagebox.showinfo("Agent busy", "Wait for the current response before changing provider settings.", parent=self.root)
+        if self._busy or self._matlab_probe_busy:
+            messagebox.showinfo(
+                "Agent busy",
+                "Wait for the current operation before changing settings.",
+                parent=self.root,
+            )
             return
         dialog = tk.Toplevel(self.root)
         dialog.title("Settings — MATLAB Simulink AI Agent")
-        dialog.geometry("620x500")
-        dialog.minsize(560, 440)
+        dialog.geometry("720x760")
+        dialog.minsize(650, 650)
         dialog.configure(bg=self.PANEL)
         dialog.transient(self.root)
         dialog.grab_set()
 
         body = ttk.Frame(dialog, style="Panel.TFrame", padding=18)
         body.pack(fill=BOTH, expand=True)
-        ttk.Label(body, text="PROVIDER SETTINGS", style="PanelTitle.TLabel").pack(anchor="w")
+        ttk.Label(body, text="SETTINGS", style="PanelTitle.TLabel").pack(anchor="w")
         ttk.Label(
             body,
-            text="The API key is stored separately and protected with Windows DPAPI when packaged on Windows.",
+            text="Provider credentials are stored separately. MATLAB probing starts matlab.exe with a fixed version command; arbitrary commands are not available until Phase 3.",
             style="Muted.TLabel",
-            wraplength=560,
+            wraplength=660,
         ).pack(anchor="w", pady=(4, 16))
 
         form = ttk.Frame(body, style="Panel.TFrame")
@@ -389,60 +501,240 @@ class MainWindow:
         model_var = tk.StringVar(value=self.settings.model)
         key_var = tk.StringVar()
         timeout_var = tk.StringVar(value=str(self.settings.request_timeout_seconds))
+        matlab_exe_var = tk.StringVar(value=self.settings.matlab_executable)
+        matlab_version_var = tk.StringVar(value=self.settings.matlab_version)
+        matlab_workdir_var = tk.StringVar(value=self.settings.matlab_working_directory)
+        simulink_dir_var = tk.StringVar(value=self.settings.simulink_project_directory)
+        matlab_timeout_var = tk.StringVar(value=str(self.settings.matlab_command_timeout_seconds))
         clear_key_var = BooleanVar(value=False)
 
-        self._form_row(form, 0, "Provider", ttk.Combobox(form, textvariable=provider_var, values=("OpenAI-compatible",), state="readonly"))
-        base_entry = ttk.Entry(form, textvariable=base_var)
-        self._form_row(form, 1, "API base URL", base_entry)
-        model_entry = ttk.Entry(form, textvariable=model_var)
-        self._form_row(form, 2, "Model", model_entry)
-        key_entry = ttk.Entry(form, textvariable=key_var, show="•")
-        self._form_row(form, 3, "New API key", key_entry)
-        timeout_entry = ttk.Entry(form, textvariable=timeout_var, width=12)
-        self._form_row(form, 4, "Timeout (seconds)", timeout_entry)
-        ttk.Label(form, text="", style="Body.TLabel").grid(row=5, column=0, pady=2)
-        ttk.Checkbutton(form, text="Clear saved API key", variable=clear_key_var).grid(row=6, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(form, text="AI PROVIDER", style="PanelTitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+        self._form_row(
+            form,
+            1,
+            "Provider",
+            ttk.Combobox(
+                form,
+                textvariable=provider_var,
+                values=("OpenAI-compatible",),
+                state="readonly",
+            ),
+        )
+        self._form_row(form, 2, "API base URL", ttk.Entry(form, textvariable=base_var))
+        self._form_row(form, 3, "Model", ttk.Entry(form, textvariable=model_var))
+        self._form_row(form, 4, "New API key", ttk.Entry(form, textvariable=key_var, show="•"))
+        self._form_row(
+            form,
+            5,
+            "AI request timeout (s)",
+            ttk.Entry(form, textvariable=timeout_var, width=12),
+        )
+        ttk.Checkbutton(
+            form,
+            text="Clear saved API key",
+            variable=clear_key_var,
+        ).grid(row=6, column=1, sticky="w", pady=(3, 12))
 
-        key_status = "A key is currently saved." if self.secret_store.has_api_key() else "No API key is saved; local endpoints may not require one."
-        ttk.Label(body, text=key_status, style="Muted.TLabel", wraplength=550).pack(anchor="w", pady=(12, 0))
+        ttk.Separator(form, orient="horizontal").grid(
+            row=7, column=0, columnspan=2, sticky="ew", pady=(0, 14)
+        )
+        ttk.Label(form, text="MATLAB CONNECTION", style="PanelTitle.TLabel").grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+
+        detected_values = tuple(item.display_name for item in self.matlab_installations)
+        if not detected_values:
+            detected_values = ("No MATLAB installations detected",)
+        detected_var = tk.StringVar(value="Choose a detected installation…")
+        detected_combo = ttk.Combobox(
+            form,
+            textvariable=detected_var,
+            values=detected_values,
+            state="readonly",
+        )
+        self._form_row(form, 9, "Detected installations", detected_combo)
+
+        exe_frame = ttk.Frame(form, style="Panel.TFrame")
+        exe_entry = ttk.Entry(exe_frame, textvariable=matlab_exe_var)
+        exe_entry.pack(side=LEFT, fill=X, expand=True)
+        ttk.Button(
+            exe_frame,
+            text="Browse…",
+            style="Secondary.TButton",
+            command=lambda: self._choose_matlab_executable(matlab_exe_var, matlab_version_var),
+        ).pack(side=RIGHT, padx=(8, 0))
+        self._form_row(form, 10, "MATLAB executable", exe_frame)
+        version_entry = ttk.Entry(form, textvariable=matlab_version_var, state="readonly")
+        self._form_row(form, 11, "Detected version", version_entry)
+
+        workdir_frame = ttk.Frame(form, style="Panel.TFrame")
+        workdir_entry = ttk.Entry(workdir_frame, textvariable=matlab_workdir_var)
+        workdir_entry.pack(side=LEFT, fill=X, expand=True)
+        ttk.Button(
+            workdir_frame,
+            text="Browse…",
+            style="Secondary.TButton",
+            command=lambda: self._choose_directory(matlab_workdir_var, "MATLAB working directory"),
+        ).pack(side=RIGHT, padx=(8, 0))
+        self._form_row(form, 12, "MATLAB working dir", workdir_frame)
+
+        project_frame = ttk.Frame(form, style="Panel.TFrame")
+        project_entry = ttk.Entry(project_frame, textvariable=simulink_dir_var)
+        project_entry.pack(side=LEFT, fill=X, expand=True)
+        ttk.Button(
+            project_frame,
+            text="Browse…",
+            style="Secondary.TButton",
+            command=lambda: self._choose_directory(simulink_dir_var, "Simulink project directory"),
+        ).pack(side=RIGHT, padx=(8, 0))
+        self._form_row(form, 13, "Simulink project dir", project_frame)
+        self._form_row(
+            form,
+            14,
+            "MATLAB probe timeout (s)",
+            ttk.Entry(form, textvariable=matlab_timeout_var, width=12),
+        )
+
+        def choose_detected(_event: object = None) -> None:
+            index = detected_combo.current()
+            if 0 <= index < len(self.matlab_installations):
+                installation = self.matlab_installations[index]
+                matlab_exe_var.set(str(installation.executable))
+                matlab_version_var.set(installation.release)
+
+        detected_combo.bind("<<ComboboxSelected>>", choose_detected)
+        key_status = (
+            "A provider key is currently saved."
+            if self.secret_store.has_api_key()
+            else "No provider key is saved; local endpoints may not require one."
+        )
+        ttk.Label(body, text=key_status, style="Muted.TLabel", wraplength=650).pack(
+            anchor="w", pady=(14, 0)
+        )
         ttk.Label(
             body,
-            text="Phase 1 supports OpenAI-compatible chat-completions servers, including compatible local LLM servers. MATLAB connection settings will be added in Phase 2.",
+            text="MATLAB is launched only for the connection probe. The selected working and Simulink project directories are stored as preferences and are not modified in Phase 2.",
             style="Muted.TLabel",
-            wraplength=550,
-        ).pack(anchor="w", pady=(18, 0))
+            wraplength=650,
+        ).pack(anchor="w", pady=(8, 0))
 
         buttons = ttk.Frame(body, style="Panel.TFrame")
         buttons.pack(side="bottom", fill=X, pady=(18, 0))
-        ttk.Button(buttons, text="Cancel", style="Secondary.TButton", command=dialog.destroy).pack(side=RIGHT, padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Cancel",
+            style="Secondary.TButton",
+            command=dialog.destroy,
+        ).pack(side=RIGHT, padx=(8, 0))
 
         def save() -> None:
             try:
-                timeout = max(1, int(timeout_var.get().strip()))
+                ai_timeout = max(1, int(timeout_var.get().strip()))
+                matlab_timeout = max(1, int(matlab_timeout_var.get().strip()))
             except ValueError:
-                messagebox.showerror("Invalid timeout", "Timeout must be a whole number of seconds.", parent=dialog)
+                messagebox.showerror(
+                    "Invalid timeout",
+                    "Timeouts must be whole numbers of seconds.",
+                    parent=dialog,
+                )
                 return
             if not base_var.get().strip() or not model_var.get().strip():
-                messagebox.showerror("Incomplete settings", "API base URL and model are required.", parent=dialog)
+                messagebox.showerror(
+                    "Incomplete AI settings",
+                    "API base URL and model are required.",
+                    parent=dialog,
+                )
                 return
+            executable = matlab_exe_var.get().strip()
+            if executable and self.matlab_detector.validate_executable(executable) is None:
+                messagebox.showerror(
+                    "Invalid MATLAB executable",
+                    "Select a file named matlab.exe that exists on disk, or leave it empty if MATLAB is not installed.",
+                    parent=dialog,
+                )
+                return
+            for directory, label in (
+                (matlab_workdir_var.get().strip(), "MATLAB working directory"),
+                (simulink_dir_var.get().strip(), "Simulink project directory"),
+            ):
+                if directory and not Path(directory).is_dir():
+                    messagebox.showerror(
+                        "Invalid directory",
+                        f"{label} does not exist:\n{directory}",
+                        parent=dialog,
+                    )
+                    return
+
             self.settings.api_base_url = base_var.get().strip()
             self.settings.model = model_var.get().strip()
-            self.settings.request_timeout_seconds = timeout
+            self.settings.request_timeout_seconds = ai_timeout
+            self.settings.matlab_executable = executable
+            self.settings.matlab_version = matlab_version_var.get().strip()
+            self.settings.matlab_working_directory = matlab_workdir_var.get().strip()
+            self.settings.simulink_project_directory = simulink_dir_var.get().strip()
+            self.settings.matlab_command_timeout_seconds = matlab_timeout
             self.settings_store.save(self.settings)
             if clear_key_var.get():
                 self.secret_store.delete_api_key()
             elif key_var.get():
                 self.secret_store.set_api_key(key_var.get())
             self.engine.settings = self.settings
+            self._matlab_probe_result = None
             self._update_connection_status()
-            self._append_message("system", "Provider settings updated. API credentials are not included in chat logs.")
+            self._update_matlab_status()
+            self._append_message(
+                "system",
+                "Settings updated. The MATLAB executable will only be started by Test connection.",
+            )
             self.footer_status.configure(text="Ready")
             dialog.destroy()
 
-        ttk.Button(buttons, text="Save settings", style="Accent.TButton", command=save).pack(side=RIGHT)
+        ttk.Button(
+            buttons,
+            text="Save settings",
+            style="Accent.TButton",
+            command=save,
+        ).pack(side=RIGHT)
+
+    def _choose_matlab_executable(
+        self,
+        executable_var: tk.StringVar,
+        version_var: tk.StringVar,
+    ) -> None:
+        selected = filedialog.askopenfilename(
+            title="Select MATLAB executable",
+            filetypes=(("MATLAB executable", "matlab.exe"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        normalized = self.matlab_detector.validate_executable(selected)
+        if normalized is None:
+            messagebox.showerror(
+                "Invalid MATLAB executable",
+                "Please select a valid file named matlab.exe.",
+                parent=self.root,
+            )
+            return
+        executable_var.set(str(normalized))
+        from app.matlab.detection import parse_release
+
+        version_var.set(parse_release(normalized))
+
+    @staticmethod
+    def _choose_directory(variable: tk.StringVar, title: str) -> None:
+        selected = filedialog.askdirectory(title=f"Select {title}")
+        if selected:
+            variable.set(selected)
 
     @staticmethod
     def _form_row(parent: ttk.Frame, row: int, label: str, widget: tk.Widget) -> None:
-        ttk.Label(parent, text=label, style="Body.TLabel", width=19).grid(row=row, column=0, sticky="w", pady=6, padx=(0, 12))
+        ttk.Label(
+            parent,
+            text=label,
+            style="Body.TLabel",
+            width=24,
+        ).grid(row=row, column=0, sticky="w", pady=6, padx=(0, 12))
         widget.grid(row=row, column=1, sticky="ew", pady=6)
         parent.columnconfigure(1, weight=1)

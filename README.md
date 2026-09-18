@@ -1,32 +1,46 @@
 # MATLAB Simulink AI Agent
 
 A Windows desktop application for a provider-backed engineering assistant focused
-on MATLAB and Simulink workflows. The repository is being implemented in phases,
-with reliability and explicit safety boundaries ahead of feature count.
+on MATLAB and Simulink workflows. The repository is implemented in phases, with
+reliability and explicit safety boundaries ahead of feature count.
 
-> **Current status: Phase 1 complete.** This release provides the desktop shell,
-> conversation context, and a real OpenAI-compatible AI provider. It does **not**
-> connect to MATLAB or modify project files yet. The UI states this explicitly and
-> the agent is instructed not to claim that it ran tools it does not have.
+> **Current status: Phase 2 complete.** The application now discovers local
+> MATLAB installations and can safely verify a selected `matlab.exe` using a
+> bounded release probe. It does not yet execute arbitrary MATLAB commands or
+> modify MATLAB/Simulink project files.
 
 ## What is implemented now
 
-- A practical Windows desktop UI titled **MATLAB Simulink AI Agent**.
+- Windows-friendly desktop UI titled **MATLAB Simulink AI Agent**.
 - Provider-backed chat using any OpenAI-compatible `chat/completions` endpoint.
-  This includes hosted endpoints and compatible local LLM servers.
-- Conversation context retained for the session and bounded before each request.
-- Non-blocking network calls so the window remains responsive.
-- Settings for API base URL, model, timeout, workspace preview, and credentials.
-- A read-only project-folder preview for common MATLAB/Simulink extensions.
-- Redacted application logging; request bodies and API keys are not logged.
-- Windows DPAPI protection for the saved API key when running on Windows.
-- A PyInstaller script that produces `MATLAB-Simulink-AI-Agent.exe`.
-- Standard-library runtime dependencies, which keeps the first Windows build
-  straightforward.
+- Hosted and compatible local LLM endpoint support.
+- Session conversation context with bounded provider history.
+- Non-blocking provider and MATLAB probe operations.
+- Settings for:
+  - AI endpoint, model, API key, and AI timeout.
+  - MATLAB executable and detected release.
+  - MATLAB working directory.
+  - Simulink project directory.
+  - MATLAB connection probe timeout.
+- Version-agnostic MATLAB discovery through:
+  - common `Program Files` MATLAB roots,
+  - Windows MathWorks registry keys,
+  - PATH,
+  - optional `MATLAB_INSTALLATION_ROOTS` environment override.
+- Manual MATLAB executable selection with `matlab.exe` validation.
+- Safe connection probe using `matlab.exe -batch "disp(version('-release'))"`.
+- Captured MATLAB stdout/stderr, timeout handling, non-zero exit handling, and
+  clear connection status in the UI.
+- Read-only workspace folder preview for common MATLAB/Simulink file types.
+- Windows DPAPI protection for the saved API key.
+- Credential-redacted application logging.
+- PyInstaller script that produces `MATLAB-Simulink-AI-Agent.exe`.
+- Standard-library runtime dependencies.
 
-The provider boundary is deliberately small so later phases can add real tools
-such as `detect_matlab`, `execute_matlab`, `inspect_simulink_model`, and
-`run_simulink_simulation` without coupling them to the view.
+The provider and MATLAB service boundaries are deliberately separate from the
+view. Later phases can add real tools such as `execute_matlab`,
+`run_matlab_script`, `inspect_simulink_model`, and
+`run_simulink_simulation` without embedding them in UI callbacks.
 
 ## Architecture
 
@@ -37,6 +51,9 @@ app/
 │   └── engine.py             provider orchestration and engineering prompt
 ├── config/settings.py        atomic, non-secret JSON preferences
 ├── logging/setup.py          credential-redacting log handler
+├── matlab/
+│   ├── detection.py          registry, filesystem, and PATH discovery
+│   └── connection.py         bounded release probe service
 ├── providers/
 │   ├── base.py               provider protocol and safe error types
 │   └── openai_compatible.py  standard-library HTTP implementation
@@ -44,9 +61,9 @@ app/
 └── ui/main_window.py          Tk desktop application
 ```
 
-The current UI is intentionally separate from the provider and agent layers.
-MATLAB automation should be added behind tool interfaces in later phases rather
-than embedded in button callbacks.
+The UI receives detector and connection service instances from `app/main.py`.
+MATLAB operations are kept out of chat and settings code so execution, timeout,
+and diagnostics behavior can be tested independently.
 
 ## Requirements
 
@@ -54,9 +71,13 @@ than embedded in button callbacks.
 
 - Windows 10 or Windows 11.
 - Python 3.10 or newer for development, or the packaged executable.
-- A reachable OpenAI-compatible chat-completions endpoint and model. A local
-  compatible server may omit the API key; hosted providers normally require it.
-- MATLAB is **not required for Phase 1** and is not detected yet.
+- A reachable OpenAI-compatible chat-completions endpoint and model for AI
+  responses. A local compatible server may omit the API key.
+- MATLAB is optional for launching the application. If MATLAB is not installed,
+  the AI chat remains available and the UI reports that MATLAB was not found.
+- MATLAB R2019a or newer is recommended for the `-batch` connection probe.
+  Older releases may be detected, but the probe may report an unsupported
+  command-line option.
 
 The application uses Python's standard library at runtime. `tkinter` is part of
 standard Windows Python distributions. The development sandbox used for this
@@ -77,10 +98,42 @@ On first launch:
 1. Select **Settings**.
 2. Enter an OpenAI-compatible API base URL, such as `https://api.openai.com/v1`.
 3. Enter the model name and, for a hosted service, the API key.
-4. Save settings and send an engineering question.
+4. If MATLAB is installed, choose a detected installation or browse to
+   `matlab.exe`.
+5. Optionally set MATLAB and Simulink project directories.
+6. Use **Test connection** in the left MATLAB card to verify the installation.
 
-The first message in the chat explains the Phase 1 boundary. Use **New chat**
-to clear the in-memory conversation context.
+The chat can be used even when MATLAB is missing. Phase 2 only starts MATLAB for
+the fixed version probe; it cannot run user-provided MATLAB commands.
+
+## MATLAB discovery details
+
+Discovery does not assume one MATLAB release and does not scan the entire disk.
+It checks:
+
+- `%ProgramW6432%\MATLAB`.
+- `%ProgramFiles%\MATLAB`.
+- `%ProgramFiles(x86)%\MATLAB`.
+- MathWorks MATLAB registry keys in HKLM/HKCU.
+- `matlab.exe` or `matlab` on PATH.
+- Extra roots listed in `MATLAB_INSTALLATION_ROOTS`, separated by the platform
+  path separator.
+
+For example, a managed installation can be exposed during development with:
+
+```bat
+set MATLAB_INSTALLATION_ROOTS=D:\Engineering\MATLAB
+```
+
+The connection probe invokes MATLAB without a shell:
+
+```text
+matlab.exe -batch "disp(version('-release'))"
+```
+
+The service captures output, enforces the configured timeout, and reports
+invalid paths, missing working directories, startup errors, MATLAB errors, and
+timeouts separately.
 
 ## Configuration and credential handling
 
@@ -125,32 +178,46 @@ py -3 -m unittest discover -s tests -v
 py -3 -m compileall -q app
 ```
 
-The suite covers settings round trips, secret separation, conversation bounds,
-provider HTTP requests against a local test server, provider configuration
-errors, agent context, and credential-redacted logging.
+The suite covers:
+
+- settings round trips and secret separation,
+- conversation bounds and reset,
+- provider HTTP requests and configuration failures,
+- agent context handling,
+- credential-redacted logging,
+- MATLAB release parsing,
+- missing/invalid MATLAB executables,
+- multi-release installation discovery,
+- successful MATLAB probe,
+- MATLAB startup error,
+- MATLAB timeout,
+- invalid working directory handling.
 
 ## Safety and current limitations
 
-Phase 1 has no MATLAB execution, Simulink model access, file-writing tool, shell
-execution, or model-generation capability. The workspace panel only lists files
-in a selected folder; it does not send them to the AI. No action can silently
-modify a project in this phase.
+Phase 2 has no general MATLAB command execution, generated temporary scripts,
+Simulink model access, file-writing tool, shell execution, or model-generation
+capability. The workspace panel only lists files in a selected folder; it does
+not send them to the AI. No action can silently modify a project.
 
-Provider responses are displayed as assistant text and should still be reviewed
-as engineering advice. The provider may be unavailable; the UI reports a clear
-error and remains usable for retrying or changing settings. A local model can be
-used for offline operation if it exposes an OpenAI-compatible HTTP endpoint.
+The **Test connection** action runs only the fixed release probe and does not
+accept text from the chat as a MATLAB command. Provider responses remain
+engineering advice and should be reviewed before being used in a real model.
+
+If MATLAB is unavailable, the AI chat remains usable. If the AI provider is
+unavailable, the MATLAB connection probe remains independent and usable.
 
 ## Roadmap
 
-The next recommended increment is **Phase 2: MATLAB detection and connection**:
+The next recommended increment is **Phase 3: MATLAB command and script execution**:
 
-1. Detect supported `matlab.exe` installations without assuming a version.
-2. Add a settings selector for the executable and default directories.
-3. Add a connection status probe with clear missing/invalid-path states.
-4. Keep all MATLAB operations behind a cancellable execution service, with
-   captured stdout, stderr, timeout, and structured error information.
+1. Add a dedicated execution service for user-approved MATLAB commands/scripts.
+2. Use `-batch` and generated temporary `.m` files without shell invocation.
+3. Capture stdout, stderr, exit code, duration, timeout, and structured errors.
+4. Add explicit command preview and approval in the UI.
+5. Keep execution scoped to the selected MATLAB working/project directory.
+6. Add tests for success, syntax errors, runtime errors, and timeout behavior.
 
-Subsequent phases can add command/script execution, selective project context,
-real Simulink inspection/generation, approval gates, diagnostics, engineering
-modules, and finally an end-to-end PID demo.
+Later phases can add selective project context, real Simulink inspection and
+model generation, approval gates, diagnostics, engineering modules, and finally
+an end-to-end PID demo.

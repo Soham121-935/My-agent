@@ -20,18 +20,18 @@ APP_NAME = "MATLAB-Simulink-AI-Agent"
 
 @dataclass
 class AppSettings:
-    """User-configurable preferences for Phase 1.
-
-    The fields for later engineering phases are intentionally present as safe,
-    inert configuration. Keeping them here means the UI and future tools can
-    evolve without changing the settings file format.
-    """
+    """User-configurable preferences shared by the UI and services."""
 
     provider: str = "openai-compatible"
     api_base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
     request_timeout_seconds: int = 60
     workspace_directory: str = ""
+    matlab_executable: str = ""
+    matlab_version: str = ""
+    matlab_working_directory: str = ""
+    simulink_project_directory: str = ""
+    matlab_command_timeout_seconds: int = 30
     max_auto_fix_attempts: int = 3
     auto_approve_safe_actions: bool = True
 

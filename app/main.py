@@ -8,6 +8,7 @@ import sys
 from app.agent.engine import AgentEngine
 from app.config.settings import SettingsStore
 from app.logging.setup import setup_logging
+from app.matlab import MatlabConnection, MatlabDetector
 from app.security.secret_store import SecretStore
 
 
@@ -34,9 +35,22 @@ def main() -> int:
         return 2
 
     engine = AgentEngine(settings, secret_store)
+    matlab_detector = MatlabDetector()
+    matlab_connection = MatlabConnection(matlab_detector)
+    matlab_installations = matlab_detector.detect()
+    logger.info("MATLAB installations detected: %s", len(matlab_installations))
     root = tk.Tk()
     try:
-        MainWindow(root, settings_store, secret_store, settings, engine)
+        MainWindow(
+            root,
+            settings_store,
+            secret_store,
+            settings,
+            engine,
+            matlab_detector,
+            matlab_connection,
+            matlab_installations,
+        )
         root.mainloop()
     except Exception:
         logger.exception("fatal UI error")
