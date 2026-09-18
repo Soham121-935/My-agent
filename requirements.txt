@@ -1,0 +1,8 @@
+# Runtime dependencies: Python 3.10+ standard library only.
+#
+# Build dependency (install on Windows when packaging):
+#   py -3 -m pip install pyinstaller
+#
+# Phase 2 may add the official MATLAB Engine API for Python. It is intentionally
+# not required for Phase 1 so the provider-backed desktop chat remains small and
+# easy to package.
